@@ -1,5 +1,5 @@
 {
-  "name": "number-formatter-bot",
+  "name": "image-number-scanner",
   "version": "1.0.0",
   "main": "bot.js",
   "scripts": {
@@ -7,6 +7,6 @@
   },
   "dependencies": {
     "telegraf": "^4.15.3",
-    "axios": "^1.6.2"
+    "axios": "^0.27.2"
   }
 }
