@@ -1,124 +1,156 @@
 const { Telegraf } = require('telegraf');
 const axios = require('axios');
 const fs = require('fs');
+const path = require('path');
 
 const BOT_TOKEN = "8024603369:AAGcKhruO6zey0ubFaRdGY740ZyYRYEyLDM";
 const bot = new Telegraf(BOT_TOKEN);
 
-// OCR ছাড়াই নাম্বার এক্সট্রাক্ট (ইমেজ থেকে টেক্সট না পড়ে)
-function extractNumbersFromText(text) {
-  if (!text) return [];
-  
-  // US ফোন নম্বর প্যাটার্ন
-  const patterns = [
-    /\+\d{10,15}/g, // +12345678901
-    /\b\d{10,15}\b/g, // 1234567890
-    /\b1?\d{10}\b/g // 1234567890 বা 11234567890
-  ];
-  
-  let allNumbers = [];
-  
-  for (const pattern of patterns) {
-    const matches = text.match(pattern) || [];
-    allNumbers = [...allNumbers, ...matches];
-  }
-  
-  // ক্লিনিং এবং ফরম্যাটিং
-  const cleaned = [...new Set(allNumbers.map(num => {
-    // শুধু ডিজিট রাখা
-    const digits = num.replace(/\D/g, '');
-    
-    // যদি 10 ডিজিট হয়
-    if (digits.length === 10) {
-      return '+1' + digits;
+// ডিরেক্ট OCR এর জন্য exec ব্যবহার
+const { exec } = require('child_process');
+const util = require('util');
+const execPromise = util.promisify(exec);
+
+async function extractTextFromImage(imageUrl) {
+    try {
+        console.log("Downloading image...");
+        
+        // ইমেজ ডাউনলোড
+        const response = await axios({
+            method: 'GET',
+            url: imageUrl,
+            responseType: 'arraybuffer'
+        });
+        
+        // টেম্প ফাইল সেভ
+        const tempDir = '/tmp';
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+        }
+        
+        const tempImagePath = path.join(tempDir, `ocr_image_${Date.now()}.png`);
+        fs.writeFileSync(tempImagePath, Buffer.from(response.data));
+        
+        console.log("Running OCR...");
+        
+        // সরাসরি tesseract কমান্ড
+        const { stdout } = await execPromise(`tesseract "${tempImagePath}" stdout --psm 6`);
+        
+        // টেম্প ফাইল ডিলিট
+        fs.unlinkSync(tempImagePath);
+        
+        console.log("OCR completed");
+        return stdout;
+        
+    } catch (error) {
+        console.error("OCR Error:", error.message);
+        return null;
     }
-    // যদি 11 ডিজিট হয় এবং 1 দিয়ে শুরু হয়
-    else if (digits.length === 11 && digits.startsWith('1')) {
-      return '+' + digits;
-    }
-    // অন্য ক্ষেত্রে
-    else {
-      return '+' + digits;
-    }
-  }).filter(num => {
-    const digitCount = num.replace('+', '').length;
-    return digitCount >= 10 && digitCount <= 15;
-  }))];
-  
-  return cleaned;
 }
 
-// টেক্সটে শুধু নাম্বার থাকলে format করবে
-bot.on('text', async (ctx) => {
-  const text = ctx.message.text;
-  
-  // শুধু ফোন নম্বর থাকলে
-  const numbers = extractNumbersFromText(text);
-  
-  if (numbers.length > 0) {
-    // ফর্ম্যাটেড আউটপুট (টাচ করলেই কপি হবে)
-    const output = numbers.join('\n');
+function extractNumbers(text) {
+    if (!text) return [];
     
-    const msg = await ctx.reply(output);
+    // শুধু US ফোন নম্বর প্যাটার্ন
+    const phoneRegex = /(\+?1?[\.\-\s]?\(?\d{3}\)?[\.\-\s]?\d{3}[\.\-\s]?\d{4})/g;
+    const matches = text.match(phoneRegex) || [];
     
-    // 2 মিনিট পর ডিলিট
+    const numbers = [];
+    for (let match of matches) {
+        // শুধু ডিজিট
+        let digits = match.replace(/\D/g, '');
+        
+        // ফরম্যাটিং
+        if (digits.length === 10) {
+            numbers.push('+1' + digits);
+        } else if (digits.length === 11 && digits.startsWith('1')) {
+            numbers.push('+' + digits);
+        } else if (digits.length >= 10 && digits.length <= 15) {
+            numbers.push('+' + digits);
+        }
+    }
+    
+    // ডুপ্লিকেট রিমুভ
+    return [...new Set(numbers)];
+}
+
+// ২ মিনিট পর ডিলিট
+function scheduleDelete(ctx, chatId, messageId) {
     setTimeout(async () => {
-      try {
-        await ctx.deleteMessage(msg.message_id);
-        await ctx.deleteMessage(ctx.message.message_id);
-      } catch(e) {}
-    }, 120000);
-  }
-});
+        try {
+            await bot.telegram.deleteMessage(chatId, messageId);
+            console.log(`Deleted message ${messageId}`);
+        } catch (e) {
+            // ইগনোর
+        }
+    }, 2 * 60 * 1000); // ২ মিনিট
+}
 
-// ইমেজ আসলে শুধু বলে দিবে টেক্সট পাঠাতে
+// ইমেজ হ্যান্ডলার
 bot.on('photo', async (ctx) => {
-  const msg = await ctx.reply(
-    '📸 Please send the phone numbers as text (type or paste them).\n\n' +
-    'Example:\n' +
-    '+16022078028\n' +
-    '+16024971069\n' +
-    '+16024973298'
-  );
-  
-  // 2 মিনিট পর ডিলিট
-  setTimeout(async () => {
+    const chatId = ctx.chat.id;
+    const messageId = ctx.message.message_id;
+    
     try {
-      await ctx.deleteMessage(msg.message_id);
-      await ctx.deleteMessage(ctx.message.message_id);
-    } catch(e) {}
-  }, 120000);
+        console.log("Processing image...");
+        
+        // ইমেজ ফাইল পেতে
+        const photo = ctx.message.photo[ctx.message.photo.length - 1];
+        const file = await ctx.telegram.getFile(photo.file_id);
+        const imageUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+        
+        // OCR প্রসেস
+        const text = await extractTextFromImage(imageUrl);
+        
+        if (!text) {
+            const errorMsg = await ctx.reply("❌");
+            scheduleDelete(ctx, chatId, errorMsg.message_id);
+            scheduleDelete(ctx, chatId, messageId);
+            return;
+        }
+        
+        // নাম্বার এক্সট্রাক্ট
+        const numbers = extractNumbers(text);
+        
+        if (numbers.length === 0) {
+            const noNumMsg = await ctx.reply("❌");
+            scheduleDelete(ctx, chatId, noNumMsg.message_id);
+            scheduleDelete(ctx, chatId, messageId);
+            return;
+        }
+        
+        // শুধু নাম্বার দেখাবে - কোনো ফালতু টেক্সট নেই
+        const result = await ctx.reply(numbers.join('\n'));
+        
+        // সব ডিলিট হবে ২ মিনিট পর
+        scheduleDelete(ctx, chatId, result.message_id);
+        scheduleDelete(ctx, chatId, messageId);
+        
+        console.log(`Found ${numbers.length} numbers`);
+        
+    } catch (error) {
+        console.error("Error:", error.message);
+        const errorMsg = await ctx.reply("❌");
+        scheduleDelete(ctx, chatId, errorMsg.message_id);
+        scheduleDelete(ctx, chatId, messageId);
+    }
 });
 
-// স্টার্ট কম্যান্ড
+// স্টার্ট কম্যান্ড (ডিলিট হবে)
 bot.command('start', async (ctx) => {
-  const msg = await ctx.reply(
-    '📞 Phone Number Formatter Bot\n\n' +
-    'Just send phone numbers (one per line):\n\n' +
-    '+16022078028\n' +
-    '+16024971069\n' +
-    '+16024973298\n\n' +
-    'I will format them properly and you can copy by tapping.'
-  );
-  
-  setTimeout(async () => {
-    try {
-      await ctx.deleteMessage(msg.message_id);
-    } catch(e) {}
-  }, 120000);
-});
-
-// এরর হ্যান্ডলিং
-bot.catch((err, ctx) => {
-  console.error('Bot error:', err);
+    const msg = await ctx.reply('📸');
+    scheduleDelete(ctx, ctx.chat.id, msg.message_id);
 });
 
 // বট শুরু
 bot.launch()
-  .then(() => {
-    console.log('✅ Bot started successfully!');
-  })
-  .catch(err => {
-    console.error('❌ Failed to start:', err.message);
-    process.exit(1);
-  });
+    .then(() => {
+        console.log('✅ Bot started successfully!');
+        console.log('🤖 Ready to scan images...');
+    })
+    .catch(err => {
+        console.error('❌ Failed to start:', err.message);
+    });
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
