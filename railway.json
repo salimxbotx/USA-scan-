@@ -1,0 +1,9 @@
+{
+  "build": {
+    "builder": "NIXPACKS",
+    "buildCommand": "apt-get update && apt-get install -y tesseract-ocr && npm install"
+  },
+  "deploy": {
+    "startCommand": "node bot.js"
+  }
+}
